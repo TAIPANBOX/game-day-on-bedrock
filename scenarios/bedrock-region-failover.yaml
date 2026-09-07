@@ -1,0 +1,83 @@
+# bedrock-region-failover: a fire drill for what an agent's caller sees
+# when a Bedrock cross-region inference profile fails over to another
+# region.
+#
+# Defensive intent: cross-region failover is a Bedrock-side behaviour of
+# inference profiles (RUNBOOK.md's own "What can go wrong": "a Bedrock-side
+# behaviour... the mock simulates the observable, not the mechanism"). This
+# drill does not, and cannot, make a real profile fail over; it points the
+# gateway's TOKENFUSE_UPSTREAM at a stub in the operator's own
+# pre-production environment that stands in for the OBSERVABLE a failover
+# produces: a real call still succeeds, but slower, and answered by a
+# different region than usual. The question this rehearses is whether the
+# operator's own stack notices and records that a failover happened at all,
+# not whether Bedrock's own routing worked.
+#
+# # verify: this whole scenario is speculative infrastructure. Unlike
+# bedrock-throttle.yaml and bedrock-model-retired.yaml (a reachable stub
+# answering a documented AWS error shape), there is no AWS-documented
+# response shape to crib from here: a real cross-region failover is
+# invisible to the CALLER except through elevated latency and, if the
+# response happens to carry one, AWS's own region-identifying metadata.
+# Nothing here confirms Bedrock's Converse/Messages responses carry an
+# explicit "which region answered" field at all; this file invents a
+# header name, x-mock-region, for the STUB to set, purely as a marker this
+# drill's own harness controls, not a real Bedrock or TokenFuse header.
+# Confirm on the day whether a real response exposes anything equivalent,
+# and rename/remove this field to match.
+#
+# # verify: the scenario format (internal/scenario.Expect,
+# mockryx/internal/scenario/scenario.go) has no field for asserting on
+# LATENCY at all: Status, an exact-match Header map, WithinRepeats (an
+# attempt-count bound, not a time bound) and an async Event (which bounds
+# how long an OFF-PATH reaction may take, not the synchronous call itself).
+# There is no way to write "this call should take at least N seconds" in
+# this file's own steps: block. If the elevated latency itself needs to be
+# part of the evidence, capture it manually (time the call, or read it from
+# the gateway's own event file) rather than expecting mockryx to assert it.
+#
+# # verify: same stub-infrastructure caveat as the other two files in this
+# folder: mockryx's shipped game-day drill only rehearses an UNREACHABLE
+# upstream turned into the gateway's own 502; a reachable, slower, and
+# differently-answering upstream needs a stub this repository does not
+# ship. This file assumes the operator has stood one up.
+#
+# # verify: whether ANY agent-event is emitted for an ordinary, successful
+# (if slow and cross-region) call is not something a Finding would
+# normally check for at all: an allowed call that clears every guardrail is
+# the everyday case every other shipped scenario's "does the gateway
+# forward a good call" half already exercises, not something game-day
+# specific. Whether this drill should assert an event here (e.g. a
+# region-failover-specific agent-event type) or none is left unresolved;
+# no event: block is included below on the reasoning that inventing an
+# event TYPE with no source for it would be worse than omitting one, but
+# revisit this once RUNBOOK.md step 1's calibration says what, if anything,
+# a real cross-region call actually produces.
+name: bedrock-region-failover
+description: >
+  A cross-region inference profile fails over to another region: the
+  stub answers successfully but slower, and marks which region it
+  answered from. The gateway should forward the call as an ordinary
+  success (never hang, never retry into a loop, never mask which region
+  actually served it), so an operator reading the trail can tell a
+  failover happened.
+steps:
+  - name: failed-over-call-still-succeeds-and-is-marked
+    request:
+      model: claude-haiku
+      max_tokens: 50
+      messages:
+        - role: user
+          content: "please pull this week's cost anomaly digest"
+    headers:
+      agent_id: agent://mockryx.local/rehearsal/bedrock-region-failover
+      on_behalf_of: "user://mockryx.local/rehearsal-operator"
+      budget_usd: "1.00"
+      task_type: game_day
+    expect:
+      status: 200
+      header:
+        # See the first verify note above: this header name and its value
+        # are this drill's own stub convention, not a confirmed Bedrock or
+        # TokenFuse field.
+        x-mock-region: eu-west-1

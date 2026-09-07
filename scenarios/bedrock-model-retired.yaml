@@ -1,0 +1,94 @@
+# bedrock-model-retired: a fire drill for calling a Bedrock model id AWS
+# has retired.
+#
+# Defensive intent: the gateway's TOKENFUSE_UPSTREAM, in the operator's own
+# pre-production environment, is pointed at a stub that answers the way
+# Bedrock answers a retired/unknown model id. This rehearses "the model
+# this agent was built against no longer exists": does the gateway surface
+# a clean, correctly-coded refusal (never a hang, a silent fallback to a
+# different model, or a fabricated 200), and does the same run's own trail
+# still reach a human.
+#
+# The fault body below is a DOCUMENTED shape (AWS's own Bedrock Runtime
+# error reference: a ValidationException for an invalid/unavailable model
+# identifier), not one observed against a real account. RUNBOOK.md step 1
+# calibrates this with one real call to a retired model id and replaces the
+# illustration below with the observed bytes:
+#
+#   HTTP/1.1 400 Bad Request
+#   Content-Type: application/json
+#   x-amzn-ErrorType: ValidationException
+#   {"message": "The provided model identifier is invalid."}
+#
+# # verify: the exact status code AWS uses for a retired-model-id call.
+# ValidationException is conventionally reported as HTTP 400 on Bedrock's
+# own REST surface; this file assumes 400 below rather than, say, 404. This
+# is unconfirmed against the pinned account/region and must be checked by
+# the real calibration call RUNBOOK.md step 1 asks for, not assumed from
+# this comment.
+#
+# # verify: nothing in this file asserts on the body text itself.
+# internal/scenario's Expect struct (mockryx/internal/scenario/scenario.go)
+# only supports Status, an exact-match Header map, and an async Event;
+# there is no field to match a JSON body's content. Capture the real body
+# from the stub's own logs or the gateway's event file if it matters for
+# the article.
+#
+# # verify: same caveat as bedrock-throttle.yaml: mockryx's shipped
+# game-day drill only rehearses an UNREACHABLE upstream (a refused TCP
+# connection), which the gateway turns into its own 502. A REACHABLE
+# upstream answering 400 needs a stub HTTP server this repository does not
+# ship; this file assumes the operator has stood one up and pointed
+# TOKENFUSE_UPSTREAM at it for the duration of this drill.
+#
+# # verify: whether a reachable non-2xx response from the stub causes the
+# gateway to emit ANY agent-event `--watch-events` could catch is
+# unconfirmed. provider-outage-game-day.yaml's own grounding says
+# `dependency_failed` fires only on the Err (transport-failure) arm of
+# HttpProvider::send, not on an Ok(non-2xx) response, so the second step
+# below may itself come back a Finding rather than a pass; that is a
+# genuine result of this drill, not a bug in it, if so.
+name: bedrock-model-retired
+description: >
+  The agent calls a Bedrock model id that has been retired. The gateway's
+  upstream (standing in for Bedrock) answers a documented
+  ValidationException shape; the gateway should surface a clean,
+  correctly-coded refusal rather than fall back to a different model
+  silently, and heraldyx should hear about it if the same reaction
+  mechanism extends to a reachable, non-2xx upstream response (see the
+  verify note above).
+steps:
+  - name: retired-model-id-surfaces-cleanly
+    request:
+      # Deliberately not a real, current model id: this rehearses what
+      # happens when the id an agent was built against no longer resolves.
+      model: eu.anthropic.claude-sonnet-1-retired
+      max_tokens: 50
+      messages:
+        - role: user
+          content: "please draft this month's cost anomaly summary"
+    headers:
+      agent_id: agent://mockryx.local/rehearsal/bedrock-model-retired
+      on_behalf_of: "user://mockryx.local/rehearsal-operator"
+      budget_usd: "1.00"
+      task_type: game_day
+    expect:
+      status: 400
+  - name: does-heraldyx-hear-about-it
+    request:
+      model: eu.anthropic.claude-sonnet-1-retired
+      max_tokens: 50
+      messages:
+        - role: user
+          content: "please draft this month's cost anomaly summary"
+    headers:
+      agent_id: agent://mockryx.local/rehearsal/bedrock-model-retired
+      on_behalf_of: "user://mockryx.local/rehearsal-operator"
+      budget_usd: "1.00"
+      task_type: game_day
+    expect:
+      status: 400
+      event:
+        source: heraldyx
+        type: alert_sent
+        within: 20s

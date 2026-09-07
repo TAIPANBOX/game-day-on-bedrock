@@ -1,0 +1,74 @@
+name: game-day
+
+# The game day as a pipeline gate. The job's exit code is the whole result:
+# green means every scenario got the status it expected at the gateway AND
+# the reaction it expected from the notifier; red means at least one did not.
+#
+# Two ways to run it: every push to main, and by hand with heraldyx_enabled
+# set to "false" for the drill that must fail (a drill that cannot fail
+# proves nothing).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      heraldyx_enabled:
+        description: "Set to false for the on-purpose failure drill"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+jobs:
+  game-day:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BINARY_SOURCE: release
+      HERALDYX_ENABLED: ${{ github.event.inputs.heraldyx_enabled || 'true' }}
+      WORKDIR: ${{ github.workspace }}/.game-day
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Go, for the two tools built from source
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+
+      - name: Fetch the gateway release and build the two tools
+        run: |
+          source lib/steps.sh
+          fetch_binaries
+
+      - name: Start the gateway in mock-upstream mode and the notifier
+        run: |
+          source lib/steps.sh
+          start_tokenfuse
+          start_heraldyx
+
+      - name: Run the three scenarios
+        run: |
+          source lib/steps.sh
+          run_scenarios
+
+      - name: Keep the run's logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-day-logs
+          path: |
+            .game-day/*.log
+            .game-day/events/*.ndjson
+            .game-day/heraldyx-state/*.ndjson
+            .game-day/mail.txt
+          if-no-files-found: ignore
+
+      - name: Teardown
+        if: always()
+        run: |
+          source lib/steps.sh
+          teardown

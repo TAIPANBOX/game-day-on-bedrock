@@ -1,0 +1,103 @@
+# bedrock-throttle: a fire drill for a Bedrock provider that is reachable
+# but answering 429 (ThrottlingException) under load.
+#
+# Defensive intent: the gateway's TOKENFUSE_UPSTREAM, in the operator's own
+# pre-production environment, is pointed at a stub that answers a Bedrock
+# throttle. This rehearses "the provider is throttling this agent": does
+# the gateway surface a clean, correctly-coded refusal rather than hang,
+# silently retry, or fabricate a 200, and does the same run's own trail
+# still reach a human the way it does for an unreachable upstream.
+#
+# The fault body below is a DOCUMENTED shape (AWS's own Bedrock Runtime
+# error reference), not one observed against a real account. RUNBOOK.md
+# step 1 calibrates this with one real throttle observation on Nova
+# (a burst above the eu-central-1 RPM quota) and replaces the illustration
+# below with the observed bytes:
+#
+#   HTTP/1.1 429 Too Many Requests
+#   Content-Type: application/json
+#   x-amzn-ErrorType: ThrottlingException
+#   {"message": "Too many requests, please wait before trying again."}
+#
+# # verify: nothing in this file asserts on that body. internal/scenario's
+# Expect struct (mockryx/internal/scenario/scenario.go) has fields for
+# Status, Header (exact string match) and an async Event only; there is no
+# field to match a response body's JSON content. If the exact body matters
+# for the article/talk, capture it directly from the stub's own logs or the
+# gateway's event file, not from a mockryx assertion.
+#
+# # verify: mockryx's shipped game-day drill (provider-outage-game-day.yaml)
+# rehearses only an UNREACHABLE upstream: TOKENFUSE_UPSTREAM pointed at an
+# address that refuses the connection outright, which the gateway's own
+# HttpProvider::send (tokenfuse/crates/gateway/src/provider.rs) turns into
+# Err(ProviderError::Upstream(..)) and a gateway-generated 502. That same
+# file's own "WHAT THIS DOES NOT REHEARSE" section says plainly that a
+# REACHABLE-but-erroring upstream (429, 500, 503) needs "a stub HTTP server
+# the operator controls well enough to answer [a status] on demand", which
+# is more infrastructure than mockryx ships or stands up today. This file
+# assumes that stub exists and is what TOKENFUSE_UPSTREAM points at for the
+# duration of this drill; it is not something `mockryx run` or this
+# repository provides by itself.
+#
+# # verify: on a REACHABLE non-2xx response, HttpProvider::send returns
+# Ok(ProviderResponse{status, ...}), forwarded to the caller unchanged, so
+# expect.status below (429) should be right IF the gateway does no
+# translation of its own. But provider-outage-game-day.yaml's own grounding
+# says the gateway's `dependency_failed` agent-event (the thing that lets
+# heraldyx hear about a failure at all) is emitted only from the Err arm of
+# st.provider.send, i.e. only for a transport-level failure, not for an
+# Ok(non-2xx) response. Whether a reachable 429 emits ANY agent-event that
+# --watch-events could catch is therefore unconfirmed and needs checking
+# against the pinned tokenfuse version's own proxy.rs before trusting the
+# second step below; if nothing fires, that step should report a Finding
+# and that Finding is itself the answer this drill is rehearsing for.
+#
+# # verify: "trailryx" is not a source name used by any shipped mockryx
+# scenario or named in README.md's async-reaction-check examples (only
+# verdryx, idryx, qryx, wardryx, heraldyx and tokenfuse appear there).
+# RUNBOOK.md's own step 3 checks trailryx's seal externally
+# (`trailryx-node read --run`), not through mockryx's `expect.event`; this
+# file does not add a second event block naming "trailryx" as a source
+# because nothing here confirms trailryx emits an agent-event mockryx could
+# poll for at all.
+name: bedrock-throttle
+description: >
+  The gateway's upstream (standing in for Bedrock) answers 429, a
+  documented ThrottlingException shape, while still reachable. The
+  gateway should surface a clean, correctly-coded refusal rather than
+  retry silently or invent a 200, and heraldyx should hear about it the
+  same way it does for an unreachable upstream, if the same mechanism
+  extends to this case (see the verify note above).
+steps:
+  - name: throttled-upstream-surfaces-cleanly
+    request:
+      model: claude-haiku
+      max_tokens: 50
+      messages:
+        - role: user
+          content: "please summarise this month's Bedrock spend"
+    headers:
+      agent_id: agent://mockryx.local/rehearsal/bedrock-throttle
+      on_behalf_of: "user://mockryx.local/rehearsal-operator"
+      budget_usd: "1.00"
+      task_type: game_day
+    expect:
+      status: 429
+  - name: does-heraldyx-hear-about-it
+    request:
+      model: claude-haiku
+      max_tokens: 50
+      messages:
+        - role: user
+          content: "please summarise this month's Bedrock spend"
+    headers:
+      agent_id: agent://mockryx.local/rehearsal/bedrock-throttle
+      on_behalf_of: "user://mockryx.local/rehearsal-operator"
+      budget_usd: "1.00"
+      task_type: game_day
+    expect:
+      status: 429
+      event:
+        source: heraldyx
+        type: alert_sent
+        within: 20s
